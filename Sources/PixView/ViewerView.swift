@@ -18,7 +18,10 @@ enum CropAspect: String, CaseIterable, Identifiable {
 
 struct ViewerView: View {
     @EnvironmentObject var lib: Library
-    @FocusState private var focused: Bool
+    @State private var monitor = EventMonitor()
+    @State private var viewSize: CGSize = .zero
+    @State private var scrollAcc: CGFloat = 0
+    @State private var scrollLocked = false
 
     @State private var image: NSImage?
     @State private var pixelSize: CGSize?
@@ -125,16 +128,15 @@ struct ViewerView: View {
                 }
                 .overlay(alignment: .top) { topBar }
                 .overlay(alignment: .bottom) { if cropping { cropBar } }
-                .onKeyPress(phases: [.down, .repeat]) { press in handleKey(press, size: geo.size) }
+                .onAppear { viewSize = geo.size }
+                .onChange(of: geo.size) { _, new in viewSize = new }
             }
             if showInfo, let u = lib.current {
                 InfoPanel(url: u)
             }
         }
-        .focusable()
-        .focused($focused)
-        .focusEffectDisabled()
-        .onAppear { focused = true }
+        .onAppear { monitor.start { handle($0) } }
+        .onDisappear { monitor.stop() }
         .onChange(of: lib.current) { _, _ in cropping = false; cropNorm = nil }
         .task(id: lib.current) { await loadCurrent() }
     }
@@ -160,33 +162,71 @@ struct ViewerView: View {
         }
     }
 
-    private func handleKey(_ press: KeyPress, size: CGSize) -> KeyPress.Result {
+    private func handle(_ e: NSEvent) -> Bool {
+        if e.type == .scrollWheel { return handleScroll(e) }
+        if e.modifierFlags.contains(.command) { return false }
+        let ch = (e.charactersIgnoringModifiers ?? "").lowercased()
         if cropping {
-            if press.key == .escape { cropping = false; cropNorm = nil; return .handled }
-            if press.key == .return { applyCrop(); return .handled }
-            return .ignored
+            if e.keyCode == 53 { cropping = false; cropNorm = nil; return true }
+            if e.keyCode == 36 || e.keyCode == 76 { applyCrop(); return true }
+            return false
         }
-        guard let u = lib.current else { return .ignored }
-        if press.key == .leftArrow { lib.step(-1); return .handled }
-        if press.key == .rightArrow { lib.step(1); return .handled }
-        if press.key == .escape { lib.viewing = false; return .handled }
-        if press.key == .space {
-            if abs(zoom - 1) < 0.01 { setZoom(actualZoom(size)) } else { resetZoom() }
-            return .handled
+        guard let u = lib.current else { return false }
+        switch e.keyCode {
+        case 123, 126: lib.step(-1); return true          // ← ↑
+        case 124, 125: lib.step(1); return true           // → ↓
+        case 53: lib.viewing = false; return true          // Esc
+        case 49:                                           // Space
+            if abs(zoom - 1) < 0.01 { setZoom(actualZoom(viewSize)) } else { resetZoom() }
+            return true
+        case 36, 76: NSApp.keyWindow?.toggleFullScreen(nil); return true
+        case 51, 117: lib.trash([u]); return true          // Delete
+        default: break
         }
-        if press.key == .return { NSApp.keyWindow?.toggleFullScreen(nil); return .handled }
-        if press.key == .delete || press.key == .deleteForward { lib.trash([u]); return .handled }
-        switch press.characters {
-        case "+", "=": setZoom(zoom * 1.25); return .handled
-        case "-": setZoom(zoom / 1.25); return .handled
-        case "0": resetZoom(); return .handled
-        case "i": showInfo.toggle(); return .handled
-        case "c": startCrop(); return .handled
-        case "r": lib.beginRename(u); return .handled
-        case "m": lib.moveToFolder([u]); return .handled
-        case "f": lib.toggleFavorite([u]); return .handled
-        default: return .ignored
+        switch ch {
+        case "+", "=": setZoom(zoom * 1.25); return true
+        case "-": setZoom(zoom / 1.25); return true
+        case "0": resetZoom(); return true
+        case "i": showInfo.toggle(); return true
+        case "c": startCrop(); return true
+        case "r": lib.beginRename(u); return true
+        case "m": lib.moveToFolder([u]); return true
+        case "f": lib.toggleFavorite([u]); return true
+        default: return false
         }
+    }
+
+    private func handleScroll(_ e: NSEvent) -> Bool {
+        guard !cropping else { return false }
+        // ⌘ 또는 ⌥ + 휠: 확대/축소
+        if e.modifierFlags.contains(.command) || e.modifierFlags.contains(.option) {
+            let dy = e.scrollingDeltaY
+            if dy != 0 { setZoom(zoom * (1 + dy * (e.hasPreciseScrollingDeltas ? 0.01 : 0.05))) }
+            return true
+        }
+        // 확대된 상태: 휠로 화면 이동
+        if zoom > 1.01 {
+            offset = CGSize(width: offset.width + e.scrollingDeltaX, height: offset.height + e.scrollingDeltaY)
+            dragStart = offset
+            return true
+        }
+        // 맞춤 상태: 휠/스와이프로 이전·다음
+        let dx = e.scrollingDeltaX, dy = e.scrollingDeltaY
+        let d = abs(dy) >= abs(dx) ? dy : dx
+        if e.hasPreciseScrollingDeltas {                    // 트랙패드
+            if e.phase == .began { scrollLocked = false; scrollAcc = 0 }
+            if e.phase == .ended || e.phase == .cancelled { scrollLocked = false; scrollAcc = 0 }
+            if scrollLocked || e.momentumPhase != [] { return true }
+            scrollAcc += d
+            if abs(scrollAcc) > 40 {
+                lib.step(scrollAcc < 0 ? 1 : -1)
+                scrollAcc = 0
+                scrollLocked = true                         // 한 번의 스와이프에 한 장만
+            }
+        } else if d != 0 {                                  // 일반 마우스 휠
+            lib.step(d < 0 ? 1 : -1)
+        }
+        return true
     }
 
     // MARK: 상단/하단 바

@@ -2,7 +2,8 @@ import SwiftUI
 
 struct GridView: View {
     @EnvironmentObject var lib: Library
-    @FocusState private var focused: Bool
+    @State private var monitor = EventMonitor()
+    @State private var gridWidth: CGFloat = 900
 
     private func columnCount(_ width: CGFloat) -> Int {
         max(1, Int((width - 24 + 10) / (CGFloat(lib.thumbSize) + 10)))
@@ -51,29 +52,37 @@ struct GridView: View {
                     if let new { proxy.scrollTo(new) }
                 }
             }
-            .focusable()
-            .focused($focused)
-            .focusEffectDisabled()
-            .onAppear { focused = true }
-            .onKeyPress(phases: [.down, .repeat]) { press in
-                let cols = columnCount(geo.size.width)
-                let cmd = press.modifiers.contains(.command)
-                if press.key == .leftArrow { lib.step(-1); return .handled }
-                if press.key == .rightArrow { lib.step(1); return .handled }
-                if press.key == .upArrow { lib.step(-cols); return .handled }
-                if press.key == .downArrow { lib.step(cols); return .handled }
-                if press.key == .return || press.key == .space {
-                    if lib.current != nil { lib.viewing = true }
-                    return .handled
-                }
-                if press.key == .delete || press.key == .deleteForward {
-                    lib.trash(lib.targets); return .handled
-                }
-                if cmd && press.characters == "a" { lib.selectAll(); return .handled }
-                if !cmd && press.characters == "f" { lib.toggleFavorite(lib.targets); return .handled }
-                return .ignored
+            .onAppear {
+                gridWidth = geo.size.width
+                monitor.start { handle($0) }
             }
+            .onDisappear { monitor.stop() }
+            .onChange(of: geo.size.width) { _, w in gridWidth = w }
         }
+    }
+
+    private func handle(_ e: NSEvent) -> Bool {
+        if e.type == .scrollWheel { return false }
+        let cols = columnCount(gridWidth)
+        let cmd = e.modifierFlags.contains(.command)
+        let ch = (e.charactersIgnoringModifiers ?? "").lowercased()
+        if cmd { 
+            if ch == "a" { lib.selectAll(); return true }
+            return false
+        }
+        switch e.keyCode {
+        case 123: lib.step(-1); return true
+        case 124: lib.step(1); return true
+        case 126: lib.step(-cols); return true
+        case 125: lib.step(cols); return true
+        case 36, 76, 49:
+            if lib.current != nil { lib.viewing = true }
+            return true
+        case 51, 117: lib.trash(lib.targets); return true
+        default: break
+        }
+        if ch == "f" { lib.toggleFavorite(lib.targets); return true }
+        return false
     }
 }
 
